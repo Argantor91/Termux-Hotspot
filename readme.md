@@ -4,7 +4,7 @@
 
 > **SECURITY ADVISORY:** This software creates network infrastructure that can potentially be exploited for phishing attacks, unauthorized device access, or malicious application distribution. Exercise extreme caution and understand all security implications before deployment. This tool hasn't been tested either
 
->  *Compilation page for Termux~ [termux/termux-packages#10160](https://github.com/termux/termux-packages/issues/10160)*
+>  *Compilation page for Termux: [termux/termux-packages#10160](https://github.com/termux/termux-packages/issues/10160)*
 
 ## 1. Project Architecture Overview
 
