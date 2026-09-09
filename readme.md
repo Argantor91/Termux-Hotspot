@@ -1,263 +1,77 @@
-# Termux-Hotspot (updated readme, no updated files)
+# Termux-Hotspot
 
-![license](https://img.shields.io/badge/license-CC0--1.0-green)
+> **SECURITY ADVISORY:** This software creates network infrastructure that can potentially be exploited for phishing attacks, unauthorized device access, or malicious application distribution. Exercise extreme caution and understand all security implications before deployment.
 
-> **SECURITY ADVISORY:** This software creates network infrastructure that can potentially be exploited for phishing attacks, unauthorized device access, or malicious application distribution. Exercise extreme caution and understand all security implications before deployment. This tool hasn't been tested either
+![License](https://img.shields.io/badge/license-CC0--1.0-green)
+![Termux](https://img.shields.io/badge/Termux-Required-blue)
+![Root Required](https://img.shields.io/badge/Root-Required-red)
 
->  *Compilation page for Termux: [termux/termux-packages#10160](https://github.com/termux/termux-packages/issues/10160)*
+## 📖 About
 
-## 1. Project Architecture Overview
+**Termux-Hotspot** is a high-performance networking utility that transforms an Android device into a fully functional Wireless Access Point (AP) with a customizable Captive Portal and DNS-based Adblocking.
 
-Termux-Hotspot is an networking utility that enables Android devices to function as a wireless access points with authentication capabilities. The solution leverages low-level networking subsystems to implement:
+It automates the entire process of setting up `hostapd`, `dnsmasq`, and a Python-based authentication server, tailored for the latest Android and Termux environments.
 
-- **Wireless Access Point (AP)** functionality via hostapd
-- **DHCP service** for network address assignment via dnsmasq
-- **Network Address Translation (NAT)** for internet traffic routing
-- **Captive Portal Authentication** system for connection authorization
+## ✨ Features (Latest Optimizations)
 
-The system architecture employs a multi-layered approach:
+*   **Dynamic WAN Interface:** Automatically detects your internet source (Cellular, USB Tethering, or Secondary Wi-Fi) instead of hardcoding `eth0`.
+*   **Built-in DNS Adblocking:** Uses a self-hosted `gost` DNS proxy with **Quad9** (primary) and **Cloudflare** (fallback) upstreams to block ads and trackers at the network level.
+*   **QoS & Bandwidth Limiting:** Implements **CAKE** QDisc (Common Applications Kept Enhanced) for bufferbloat mitigation, with a robust fallback to `iptables` for devices lacking advanced kernel support.
+*   **High-Performance Tuning:** Includes optimized `hostapd` parameters (`beacon_int`, `dtim_period`) to reduce CPU overhead and improve stability.
+*   **Modern Python 3.11+ Compatibility:** Captive portal uses `urllib.parse` instead of deprecated `cgi`.
+*   **Automatic Dependency Installation:** Installs `hostapd`, `dnsmasq`, `iptables`, and `curl` automatically if missing.
 
-```
-┌───────────────────────────────────────────┐
-│            Termux Environment             │
-├───────────┬───────────────┬───────────────┤
-│  hostapd  │    dnsmasq    │  Python HTTP  │
-│  (802.11) │  (DHCP/DNS)   │    Server     │
-├───────────┴───────────────┴───────────────┤
-│         Linux Networking Subsystem        │
-│   (IP Tables, Routing, Interface Mgmt)    │
-├───────────────────────────────────────────┤
-│        Android Network Infrastructure      │
-└───────────────────────────────────────────┘
-```
+## 🛠️ Prerequisites
 
-## 2. Technical Prerequisites
+*   **Termux:** Install from [F-Droid](https://f-droid.org/packages/com.termux/) (Play Store version requires API workarounds).
+*   **Root Access:** Required for interface manipulation and binding to port 80.
+*   **Wi-Fi Adapter:** Must support AP (Access Point) mode.
 
-### 2.1 System Requirements
+## 🚀 Installation & Deployment
 
-- Android device with Termux installed (available on [F-Droid](https://f-droid.org/packages/com.termux/))
-- Root access (required for network interface manipulation)
-- Wi-Fi adapter supporting AP (Access Point) mode
-- Minimum 50MB free storage
-- Active internet connection (cellular data or secondary Wi-Fi adapter)
+1.  **Clone the Repository:**
+    ```bash
+    pkg install git
+    git clone https://github.com/Argantor91/Termux-Hotspot.git
+    cd Termux-Hotspot
+    ```
 
-### 2.2 Required Packages
+2.  **Make Script Executable:**
+    ```bash
+    chmod +x hotspot.sh
+    ```
 
-- **hostapd**: Access point daemon for IEEE 802.11 management
-- **dnsmasq**: Lightweight DHCP and caching DNS server
-- **iptables**: Administrative tool for IPv4 packet filtering and NAT
-- **python**: Runtime environment for the captive portal system
+3.  **Run as Root:**
+    ```bash
+    tsu ./hotspot.sh
+    ```
+    *(Note: Ensure you are running the script as root, not just using `sudo` inside the script, as Termux's `tsu` is the standard for root privileges.)*
 
-## 3. Installation Procedure
+## ⚙️ Configuration
 
-### 3.1 Repository Acquisition
+Upon running, the script will prompt you for:
+*   **SSID:** The name of your Hotspot.
+*   **Password:** The Wi-Fi password.
+*   **Channel:** The Wi-Fi channel (Default: 7).
 
-```bash
-# Clone the repository
-git clone https://github.com/CPScript/Termux-Hotspot.git
-cd Termux-Hotspot
+The script will automatically:
+1.  Download the latest adblock list (hagezi/light).
+2.  Install missing dependencies.
+3.  Configure the network interfaces and IP forwarding.
+4.  Start the Captive Portal on port 8080 and redirect port 80 traffic to it.
 
-# Set execution permissions
-chmod +x software/hotspot.sh
-```
+## 🛡️ Security & Hardening
 
-### 3.2 Package Dependencies
+*   **Adblocking:** Clients will see blocked domains resolve to `127.0.0.1`.
+*   **Gateway IP:** The gateway is permanently set to `192.168.1.1` for consistency.
+*   **Firewall:** Basic NAT and Forward rules are applied. Advanced QoS rules are added if supported.
 
-```bash
-# Install required packages
-pkg update
-pkg install root-repo
-pkg install tsu hostapd dnsmasq python
+## 🐛 Troubleshooting
 
-# Verify installations
-command -v hostapd >/dev/null 2>&1 || echo "hostapd not installed"
-command -v dnsmasq >/dev/null 2>&1 || echo "dnsmasq not installed"
-command -v python >/dev/null 2>&1 || echo "python not installed"
-```
+*   **"No default route found":** Ensure you have an active internet connection (Cellular Data or USB Tethering) before starting the script.
+*   **"Port 80 busy":** If `python3` fails to bind to port 80, ensure no other service (like a web server) is running. The script attempts to redirect port 80 to the captive portal on port 8080.
+*   **No Internet for Clients:** Check if `net.ipv4.ip_forward` is enabled. The script uses `sysctl -w net.ipv4.ip_forward=1` to ensure it stays active.
 
-## 4. Implementation & Deployment
+## 📄 License
 
-### 4.1 Automated Deployment
-
-The repository provides an automated configuration script for rapid deployment:
-
-```bash
-# Navigate to software directory
-cd software
-
-# Execute the main script with root privileges
-sudo ./hotspot.sh
-```
-
-During execution, you'll be prompted to configure:
-- SSID (network name)
-- Authentication passphrase
-- Wireless channel selection
-
-### 4.2 Manual Implementation Process
-
-For environments requiring customized deployment, follow this systematic implementation procedure:
-
-#### 4.2.1 Interface Configuration
-
-First, identify your device's wireless interface and internet-connected interface:
-
-```bash
-# List network interfaces
-ip link
-
-# Identify default route interface
-ip route | grep default
-```
-
-#### 4.2.2 Create Virtual AP Interface
-
-```bash
-# Create virtual AP interface (if supported)
-iw dev wlan0 interface add wlan0ap type __ap
-
-# If virtual interface creation fails, use physical interface
-# Set interface in AP mode
-ip link set wlan0 down
-ip link set wlan0 up
-```
-
-#### 4.2.3 Configure hostapd
-
-Create a configuration file at `/etc/hostapd/hostapd.conf`:
-
-```
-interface=wlan0ap      # Or wlan0 if virtual interface not supported
-driver=nl80211
-ssid=YourNetworkName   # Customize this
-hw_mode=g
-channel=7              # Select optimal channel for your environment
-wmm_enabled=0
-macaddr_acl=0
-auth_algs=1
-ignore_broadcast_ssid=0
-wpa=2
-wpa_passphrase=YourStrongPassword  # Customize this
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=TKIP
-rsn_pairwise=CCMP
-```
-
-#### 4.2.4 Configure DHCP Service
-
-Create a configuration file at `/etc/dnsmasq.conf`:
-
-```
-interface=wlan0ap      # Must match hostapd interface
-dhcp-range=192.168.1.2,192.168.1.100,255.255.255.0,12h
-```
-
-#### 4.2.5 Initialize Network Services
-
-Start the required services:
-
-```bash
-# Kill any existing instances
-killall hostapd dnsmasq 2>/dev/null
-
-# Start hostapd
-hostapd /etc/hostapd/hostapd.conf &
-
-# Start dnsmasq
-dnsmasq &
-```
-
-#### 4.2.6 Configure Network Routing
-
-Enable IP forwarding and configure NAT:
-
-```bash
-# Enable IP forwarding
-echo 1 > /proc/sys/net/ipv4/ip_forward
-
-# Detect internet-connected interface
-WAN_IF=$(ip route | grep default | awk '{print $5}')
-
-# Set up NAT routing
-iptables -t nat -A POSTROUTING -o $WAN_IF -j MASQUERADE
-iptables -A FORWARD -i wlan0ap -o $WAN_IF -m state --state RELATED,ESTABLISHED -j ACCEPT
-iptables -A FORWARD -i $WAN_IF -o wlan0ap -j ACCEPT
-```
-
-#### 4.2.7 Deploy Captive Portal (Optional)
-
-For environments requiring authentication:
-
-```bash
-# Start the captive portal server
-python server.py &
-```
-
-## 5. Security Considerations
-
-### 5.1 Network Security Vulnerabilities
-
-This implementation presents several security considerations:
-
-- **Unauthorized Access**: Default configurations may allow unauthorized network access
-- **Network Traffic Visibility**: User traffic passes through your device
-- **Resource Constraints**: Heavy usage may affect device performance and battery life
-- **Regulatory Compliance**: Operating an access point may be subject to local regulations
-
-### 5.2 Hardening Recommendations
-
-For production deployments, implement these hardening measures:
-
-1. Configure MAC address filtering in hostapd
-2. Implement WPA2-Enterprise with RADIUS authentication
-3. Enable packet inspection and firewall rules
-4. Segregate guest network traffic
-5. Implement bandwidth limiting and QoS
-6. Maintain regular security patches
-
-## 6. Troubleshooting Procedures
-
-| Issue | Diagnostic Approach | Resolution Strategy |
-|-------|---------------------|---------------------|
-| hostapd fails to start | Check `hostapd -dd /etc/hostapd/hostapd.conf` for detailed errors | Verify interface exists, no conflicting Wi-Fi services, and correct driver support |
-| No IP addresses assigned | Examine `logcat -b all \| grep dnsmasq` | Verify dnsmasq is running and configured correctly |
-| No internet connectivity | Check `ip route` and `iptables -t nat -L -v` | Ensure IP forwarding is enabled and NAT rules are correct |
-| Clients can connect but no portal | Check `netstat -tulpn \| grep python` | Verify the Python server is running and accessible |
-
-## 7. Advanced Configuration
-
-### 7.1 Persistent Configuration
-
-For persistent deployment across reboots:
-
-```bash
-# Create init script
-cat > /data/local/hotspot_init.sh <<EOF
-#!/system/bin/sh
-# Startup script for hotspot
-/path/to/hostapd /etc/hostapd/hostapd.conf &
-/path/to/dnsmasq &
-echo 1 > /proc/sys/net/ipv4/ip_forward
-iptables -t nat -A POSTROUTING -o [WAN_INTERFACE] -j MASQUERADE
-EOF
-
-# Make executable
-chmod +x /data/local/hotspot_init.sh
-
-# Add to init.rc or use Magisk for persistent startup
-```
-
-### 7.2 Performance Optimization
-
-For high-density environments:
-
-```
-# hostapd performance tuning
-beacon_int=100
-dtim_period=2
-rts_threshold=2347
-fragm_threshold=2346
-```
----
-
-© 2025 Termux-Hotspot | Maintained by [CPScript](https://github.com/CPScript) (**Not Tested**)
+This project is licensed under the **CC0 1.0 Universal** License. You are free to use, modify, and redistribute the code for any purpose, including commercial use, without attribution.
