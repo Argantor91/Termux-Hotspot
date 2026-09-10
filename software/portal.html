@@ -1,90 +1,71 @@
-<!DOCTYPE html>
-<html lang="en">
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+import os
+import secrets
 
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Portal</title>
-    <style>
-        body {
-            font-family: 'Arial', sans-serif;
-            background-color: #23272a;
-            margin: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            color: #ffffff;
-        }
+# --- Configuration ---
+GATEWAY_IP = os.environ.get('GATEWAY_IP', '192.168.1.1')
+PASS_FILE = os.environ.get('PREFIX', '/data/data/com.termux/files/usr') + '/tmp/hp_pass'
+HTML_FILE = "portal.html"
 
-        .container {
-            text-align: center;
-            padding: 20px;
-            background-color: #2c2f33;
-            border-radius: 10px;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 1.5);
-            width: 80%;
-            max-width: 400px;
-        }
+# Load HTML Template with Fallback
+def get_template():
+    try:
+        with open(HTML_FILE, 'r') as f:
+            # Dynamically inject the Gateway IP into the HTML
+            return f.read().replace("{GATEWAY_IP}", GATEWAY_IP)
+    except FileNotFoundError:
+        # Minimal fallback if portal.html is missing
+        return "<html><body><h1>Hotspot Portal</h1><p>Connecting to {}...</p></body></html>".format(GATEWAY_IP)
 
-        h1,
-        p {
-            color: #ffffff;
-        }
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handles multiple concurrent requests (Non-blocking)."""
+    daemon_threads = True
+    def server_bind(self):
+        # Allow immediate restart by reusing the port
+        self.socket.setsockopt(1, 2, 1) # SO_REUSEADDR
+        super().server_bind()
 
-        form {
-            margin-top: 20px;
-        }
+class RequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        """Serve the portal."""
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(get_template().encode('utf-8'))
 
-        input {
-            padding: 10px;
-            margin: 5px;
-            width: calc(100% - 20px);
-            box-sizing: border-box;
-            border: 1px solid #8B0000;
-            color: #ffffff;
-            background-color: #2c2f33;
-            border-radius: 5px;
-            outline: none;
-        }
+    def do_POST(self):
+        """Handle the login."""
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length).decode('utf-8')
+        
+        from urllib.parse import parse_qs
+        params = parse_qs(post_data)
+        user_password = params.get('password', [''])[0]
 
-        input[type="submit"] {
-            background-color: #8B0000;
-            color: #282c34;
-            cursor: pointer;
-            transition: background-color 0.3s ease-in-out;
-        }
+        # 1. Securely Load Password from protected file
+        try:
+            with open(PASS_FILE, 'r') as f:
+                correct_password = f.read().strip()
+        except FileNotFoundError:
+            correct_password = "12345678"
 
-        input[type="submit"]:hover {
-            background-color: #aa0000;
-        }
+        # 2. SECURE COMPARISON: Prevent timing attacks
+        if secrets.compare_digest(user_password, correct_password):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b"<h1>✅ Connected!</h1>")
+        else:
+            self.send_response(401)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b"<h1>❌ Wrong Password</h1>")
 
-        .footer {
-            position: fixed;
-            bottom: 10px;
-            width: 100%;
-            text-align: center;
-        }
+def run(server_class=ThreadedHTTPServer, handler_class=RequestHandler, port=8080):
+    print(f"[*] Starting Threaded Captive Portal on port {port}...")
+    server = server_class(('0.0.0.0', port), handler_class)
+    server.serve_forever()
 
-        a {
-            color: #8B0000;
-            text-decoration: none;
-        }
-    </style>
-</head>
-
-<body>
-    <div class="container">
-        <h1>Termux-Hotspot v1.4</h1>
-        <p>Please enter the password to connect:</p>
-        <form action="/login" method="post">
-            <input type="password" name="password" placeholder="Password" required>
-            <input type="submit" value="Login">
-        </form>
-    </div>
-    <div class="footer">
-        <a href="https://github.com/CPScript/Termux-Hotspot">Termux-Hotspot</a> - by - <a href="https://github.com/CPScript">CPScript</a>
-    </div>
-</body>
-
-</html>
+if __name__ == '__main__':
+    run()
