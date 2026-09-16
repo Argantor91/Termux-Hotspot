@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Termux-Hotspot: Engineering Grade
-# Version: 10.3.0 (Repository Finality)
+# Version: 10.3.0 (Repository Finality Edition)
 # Description: A non-destructive, state-aware, secure network subsystem for rooted Android.
 
 # --- Color Codes ---
@@ -15,8 +15,6 @@ if [ -z "$PREFIX" ]; then
     export PREFIX='/data/data/com.termux/files/usr'
 fi
 export PATH="$PREFIX/bin:$PREFIX/sbin:$PATH"
-
-# Resolve script directory for portable execution
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Core Configuration ---
@@ -55,11 +53,19 @@ command -v tc &>/dev/null && HAS_TC=1
 
 # --- 2. Root Check ---
 if [[ $EUID -ne 0 ]]; then
-    log_err "Error: Run with: su -c ./hotspot.sh"
+    log_err "Error: Run with: su -c ./hotspot.sh or sudo ./hotspot.sh"
     exit 1
 fi
 
-# --- 3. Secure User Configuration (Raw Input) ---
+# --- 3. Capture & Release Android Wi-Fi Lock (Issue #3 Resolution) ---
+ORIG_WIFI_STATE=$(settings get global wifi_on 2>/dev/null || echo "0")
+if [ "$ORIG_WIFI_STATE" == "1" ]; then
+    log_warn "Android Wi-Fi is ON. Disabling to release interface from wpa_supplicant..."
+    svc wifi disable
+    sleep 2 # Allow kernel to tear down managed interface
+fi
+
+# --- 4. Secure User Configuration (Raw Input) ---
 log_info "Configuring Hotspot..."
 read -r -p "Enter SSID: " SSID
 [[ -z "$SSID" ]] && { log_err "SSID cannot be empty."; exit 1; }
@@ -70,8 +76,14 @@ read -r -s -p "Enter Password (min 8 chars): " PASSWORD; echo ""
 read -r -p "Enter Channel (default 7): " CHANNEL
 CHANNEL=${CHANNEL:-7}
 
-# --- 4. Hardware & Interface Detection ---
-AP_IF=$(iw dev | awk '$1=="Interface"{print $2}' | head -n 1)
+# --- 5. Hardware & Interface Detection ---
+# 1. Check for an existing AP-mode interface (e.g., ap0, wlan1)
+AP_IF=$(iw dev | awk '/Interface/{iface=$2} /type AP/{print iface; exit}')
+
+# 2. Fallback to the first non-P2P interface (usually wlan0)
+if [ -z "$AP_IF" ]; then
+    AP_IF=$(iw dev | awk '$1=="Interface" && $2 !~ /p2p-dev/{print $2}' | head -n 1)
+fi
 [ -z "$AP_IF" ] && AP_IF="wlan0"
 
 PHY_IDX=$(iw dev "$AP_IF" info 2>/dev/null | grep -oP 'wiphy \K\d+')
@@ -88,7 +100,7 @@ if [ -z "$WAN_IF" ] || [ "$WAN_IF" == "$AP_IF" ]; then
 fi
 log_info "Interfaces locked: AP=$AP_IF | WAN=$WAN_IF"
 
-# --- 5. State Capture & Pre-Flight Cleanup ---
+# --- 6. State Capture & Pre-Flight Cleanup ---
 ORIG_IP_FORWARD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
 ORIG_IPV6_STATE=$(sysctl -n net.ipv6.conf.$AP_IF.disable_ipv6 2>/dev/null || echo "0")
 ORIG_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
@@ -110,7 +122,7 @@ for chain in TERMUX_HOTSPOT_NAT TERMUX_HOTSPOT_POST; do
     iptables -t nat -F "$chain" 2>/dev/null; iptables -t nat -X "$chain" 2>/dev/null
 done
 
-# --- 6. Initialization & Network State ---
+# --- 7. Initialization & Network State ---
 log_info "Initializing network subsystem..."
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
 sysctl -w net.ipv6.conf.$AP_IF.disable_ipv6=1 >/dev/null 2>&1
@@ -119,7 +131,7 @@ ip link set "$AP_IF" up 2>/dev/null
 ip addr replace ${GATEWAY_IP}/24 dev "$AP_IF" 2>/dev/null || \
 ip addr add ${GATEWAY_IP}/24 dev "$AP_IF" 2>/dev/null || true
 
-# --- 7. QoS Application (Cake -> FQ_Codel Fallback) ---
+# --- 8. QoS Application (Cake -> FQ_Codel Fallback) ---
 QOS_APPLIED=""
 if [ "$HAS_TC" -eq 1 ]; then
     if tc qdisc replace dev "$WAN_IF" root cake 2>/dev/null; then
@@ -131,7 +143,7 @@ if [ "$HAS_TC" -eq 1 ]; then
     fi
 fi
 
-# --- 8. The Invincible Netfilter Engine ---
+# --- 9. The Invincible Netfilter Engine ---
 log_info "Injecting iptables rules..."
 
 # 1. Create Custom Chains
@@ -157,7 +169,7 @@ iptables -A TERMUX_HOTSPOT_NAT -i "$AP_IF" -p tcp --dport 80 -j REDIRECT --to-po
 iptables -A TERMUX_HOTSPOT_NAT -i "$AP_IF" -p tcp --dport 53 -j REDIRECT --to-port 5353
 iptables -A TERMUX_HOTSPOT_NAT -i "$AP_IF" -p udp --dport 53 -j REDIRECT --to-port 5353
 
-# --- 9. Bulletproof Infrastructure Deployment ---
+# --- 10. Bulletproof Infrastructure Deployment ---
 mkdir -p "$PREFIX/etc/hotspot"
 
 # Save Password for Portal (Securely)
@@ -181,7 +193,7 @@ printf "wpa_passphrase=%s\n" "$PASSWORD" >> "$PREFIX/etc/hotspot/hostapd.conf"
 
 sed -i "s/AP_IF_PLACEHOLDER/$AP_IF/g; s/CHANNEL_PLACEHOLDER/$CHANNEL/g" "$PREFIX/etc/hotspot/hostapd.conf"
 
-# --- 10. Process Supervision ---
+# --- 11. Process Supervision ---
 log_info "Spawning daemons..."
 
 HOSTAPD_BIN="$PREFIX/bin/hostapd"
@@ -223,20 +235,22 @@ start_portal
 
 sleep 2
 
-# Verify DNS and Portal
+# Verify DNS
 if ! ss -lun | grep -q ":5353"; then
     log_err "DNS Proxy failed to bind. Exiting."
     exit 1
 fi
 
-# --- 11. Cleanup (The Hard Teardown) ---
+# --- 12. Cleanup (The Hard Teardown) ---
 cleanup() {
     echo -e "\n${YELLOW}Stopping subsystem and restoring state...${NC}"
     
+    # Kill specific tracked PIDs first
     for pid_file in "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST" "$PID_PORTAL"; do
         [ -f "$pid_file" ] && kill $(cat "$pid_file") 2>/dev/null
     done
     sleep 1
+    # Fallback killall (DO NOT include python3 to prevent collateral damage)
     killall hostapd dnsmasq gost 2>/dev/null
     
     # 1. Delete the JUMPS from the main chains (Signature-based, safe)
@@ -269,6 +283,12 @@ cleanup() {
     ip addr del ${GATEWAY_IP}/24 dev "$AP_IF" 2>/dev/null || true
     ip link set "$AP_IF" down 2>/dev/null
     
+    # 6. Restore Android Wi-Fi State
+    if [ "$ORIG_WIFI_STATE" == "1" ]; then
+        log_info "Restoring Android Wi-Fi state..."
+        svc wifi enable
+    fi
+    
     rm -f "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST" "$PID_PORTAL" "$PREFIX/tmp/hp_pass"
     log_info "Subsystem offline. Host restored."
 }
@@ -276,7 +296,7 @@ trap cleanup EXIT SIGINT SIGTERM
 
 log_info "System live. Watchdog active. Press Ctrl+C to exit."
 
-# --- 12. The Watchdog (Machine-Scale Supervision) ---
+# --- 13. The Watchdog (Machine-Scale Supervision) ---
 while true; do
     for pid_file in "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST" "$PID_PORTAL"; do
         [ ! -f "$pid_file" ] && continue
