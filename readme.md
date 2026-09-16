@@ -1,77 +1,39 @@
-# Termux-Hotspot
+# Termux-Hotspot v10.3 (Repository Finality)
 
-> **SECURITY ADVISORY:** This software creates network infrastructure that can potentially be exploited for phishing attacks, unauthorized device access, or malicious application distribution. Exercise extreme caution and understand all security implications before deployment.
+> **SECURITY ADVISORY:** This software creates network infrastructure that can potentially be exploited for phishing, unauthorized device access, or malicious application distribution. It dynamically modifies SELinux states and network routing tables.
 
+![Version](https://img.shields.io/badge/version-10.3-blue)
 ![License](https://img.shields.io/badge/license-CC0--1.0-green)
 ![Termux](https://img.shields.io/badge/Termux-Required-blue)
 ![Root Required](https://img.shields.io/badge/Root-Required-red)
+![Android 12+](https://img.shields.io/badge/Android-12%2B-green)
 
 ## 📖 About
 
-**Termux-Hotspot** is a high-performance networking utility that transforms an Android device into a fully functional Wireless Access Point (AP) with a customizable Captive Portal and DNS-based Adblocking.
+**Termux-Hotspot v10.3** is a production-grade, state-aware network subsystem for rooted Android. It transforms your device into a secure Wireless Access Point with a **built-in Captive Portal**, **DNS-based Adblocking**, **NAT Routing**, and **QoS** support.
 
-It automates the entire process of setting up `hostapd`, `dnsmasq`, and a Python-based authentication server, tailored for the latest Android and Termux environments.
+Unlike previous iterations, v10.3 is engineered specifically for **Android 12+**, utilizing `iptables-nft` compatible "Jump Chains" and dynamic SELinux handling to ensure stability across fragmented OEM kernels.
 
-## ✨ Features (Latest Optimizations)
+## ✨ Features (v10.3 Architecture)
 
-*   **Dynamic WAN Interface:** Automatically detects your internet source (Cellular, USB Tethering, or Secondary Wi-Fi) instead of hardcoding `eth0`.
-*   **Built-in DNS Adblocking:** Uses a self-hosted `gost` DNS proxy with **Quad9** (primary) and **Cloudflare** (fallback) upstreams to block ads and trackers at the network level.
-*   **QoS & Bandwidth Limiting:** Implements **CAKE** QDisc (Common Applications Kept Enhanced) for bufferbloat mitigation, with a robust fallback to `iptables` for devices lacking advanced kernel support.
-*   **High-Performance Tuning:** Includes optimized `hostapd` parameters (`beacon_int`, `dtim_period`) to reduce CPU overhead and improve stability.
-*   **Modern Python 3.11+ Compatibility:** Captive portal uses `urllib.parse` instead of deprecated `cgi`.
-*   **Automatic Dependency Installation:** Installs `hostapd`, `dnsmasq`, `iptables`, and `curl` automatically if missing.
+*   **Android 12 `nftables` Compatible:** Uses dedicated `TERMUX_HOTSPOT_FWD` and `TERMUX_HOTSPOT_POST` jump chains to prevent routing collisions with native Android tethering or third-party firewalls (e.g., AFWall+).
+*   **SELinux State Awareness:** Dynamically captures the current SELinux mode. If `Enforcing`, it switches to `Permissive` to allow `hostapd` `nl80211` binding, and **restores** the original state upon exit.
+*   **Built-in Captive Portal:** Integrated Python3-based authentication server (`server.py`) with `portal.html` template support. Redirects port 80 traffic securely to port 8080.
+*   **Resilient DNS Proxy (`gost`):** Implements a dual-stack upstream fallback (`TLS` then `UDP`) to bypass ISP port 853 blocks automatically.
+*   **Captive Portal DNS Spoofing:** Automatically spoofs `connectivitycheck.gstatic.com` and other probes to force the "Sign in to network" popup on modern Android/iOS devices.
+*   **Soft QoS Dependency:** `tc` is optional. If unsupported or missing, the hotspot functions normally without QoS restrictions.
+*   **Surgical Cleanup:** Uses `ip addr del` (surgical removal) instead of `flush` to preserve IPv6 link-local addresses and Android's `WifiService` state.
+*   **Phantom Process Killer Resilience:** Designed to run alongside Android's foreground service monitor, with a robust watchdog to restart daemons on failure.
 
 ## 🛠️ Prerequisites
 
 *   **Termux:** Install from [F-Droid](https://f-droid.org/packages/com.termux/) (Play Store version requires API workarounds).
-*   **Root Access:** Required for interface manipulation and binding to port 80.
-*   **Wi-Fi Adapter:** Must support AP (Access Point) mode.
+*   **Root Access:** Required for interface manipulation and binding to ports.
+*   **Wi-Fi Adapter:** Must support AP (Access Point) mode (Realtek, Broadcom, or Qualcomm chips).
 
 ## 🚀 Installation & Deployment
 
-1.  **Clone the Repository:**
-    ```bash
-    pkg install git
-    git clone https://github.com/Argantor91/Termux-Hotspot.git
-    cd Termux-Hotspot
-    ```
+### 1. Environment Setup
 
-2.  **Make Script Executable:**
-    ```bash
-    chmod +x hotspot.sh
-    ```
-
-3.  **Run as Root:**
-    ```bash
-    tsu ./hotspot.sh
-    ```
-    *(Note: Ensure you are running the script as root, not just using `sudo` inside the script, as Termux's `tsu` is the standard for root privileges.)*
-
-## ⚙️ Configuration
-
-Upon running, the script will prompt you for:
-*   **SSID:** The name of your Hotspot.
-*   **Password:** The Wi-Fi password.
-*   **Channel:** The Wi-Fi channel (Default: 7).
-
-The script will automatically:
-1.  Download the latest adblock list (hagezi/light).
-2.  Install missing dependencies.
-3.  Configure the network interfaces and IP forwarding.
-4.  Start the Captive Portal on port 8080 and redirect port 80 traffic to it.
-
-## 🛡️ Security & Hardening
-
-*   **Adblocking:** Clients will see blocked domains resolve to `127.0.0.1`.
-*   **Gateway IP:** The gateway is permanently set to `192.168.1.1` for consistency.
-*   **Firewall:** Basic NAT and Forward rules are applied. Advanced QoS rules are added if supported.
-
-## 🐛 Troubleshooting
-
-*   **"No default route found":** Ensure you have an active internet connection (Cellular Data or USB Tethering) before starting the script.
-*   **"Port 80 busy":** If `python3` fails to bind to port 80, ensure no other service (like a web server) is running. The script attempts to redirect port 80 to the captive portal on port 8080.
-*   **No Internet for Clients:** Check if `net.ipv4.ip_forward` is enabled. The script uses `sysctl -w net.ipv4.ip_forward=1` to ensure it stays active.
-
-## 📄 License
-
-This project is licensed under the **CC0 1.0 Universal** License. You are free to use, modify, and redistribute the code for any purpose, including commercial use, without attribution.
+```bash
+pkg install git hostapd dnsmasq iptables iproute2 coreutils python3
