@@ -12,22 +12,28 @@
 
 **Termux-Hotspot v10.3** is a production-grade, state-aware network subsystem for rooted Android. It transforms your device into a secure Wireless Access Point with a **built-in Captive Portal**, **DNS-based Adblocking**, **NAT Routing**, and **QoS** support.
 
+Engineered specifically for **Android 12+**, it utilizes `iptables-nft` compatible "Jump Chains", dynamic SELinux handling, and automatic `wpa_supplicant` radio lock release to ensure stability across fragmented OEM kernels.
+
 ## ✨ Features (v10.3 Architecture)
 
-*   **Android 12 `nftables` Compatible:** Uses dedicated `TERMUX_HOTSPOT_FWD` and `TERMUX_HOTSPOT_POST` jump chains.
-*   **SELinux State Awareness:** Dynamically sets to Permissive for `hostapd` and restores original state on exit.
-*   **Built-in Captive Portal:** Integrated Python3-based authentication server with DNS spoofing for automatic popup triggering.
-*   **Resilient DNS Proxy (`gost`):** Dual-stack fallback (TLS + UDP) for ISP resilience.
-*   **Soft QoS Dependency:** `tc` is optional; falls back gracefully.
-*   **Surgical Cleanup:** Uses `ip addr del` to preserve IPv6/link-local states.
+*   **Issue #3 Resolution (Radio Lock Release):** Automatically detects if Android's native Wi-Fi is ON and uses `svc wifi disable` to release the `wlan0` interface from `wpa_supplicant`, preventing `nl80211` bind failures.
+*   **Android 12 `nftables` Compatible:** Uses dedicated `TERMUX_HOTSPOT_FWD` and `TERMUX_HOTSPOT_POST` jump chains to prevent routing collisions with native Android tethering or third-party firewalls (e.g., AFWall+).
+*   **SELinux State Awareness:** Dynamically captures the current SELinux mode. If `Enforcing`, it switches to `Permissive` to allow `hostapd` `nl80211` binding, and **restores** the original state upon exit.
+*   **Built-in Captive Portal:** Integrated Python3-based authentication server (`server.py`) with OS-probe interception (302 Redirects) to force modern iOS/Android devices to trigger the automatic "Sign in to network" popup.
+*   **Resilient DNS Proxy (`gost`):** Implements a dual-stack upstream fallback (`TLS` then `UDP`) to bypass ISP port 853 blocks automatically.
+*   **Soft QoS Dependency:** `tc` is optional. If unsupported or missing, the hotspot functions normally without QoS restrictions.
+*   **Surgical Cleanup:** Uses `ip addr del` (surgical removal) instead of `flush` to preserve IPv6 link-local addresses and Android's `WifiService` state.
 
-## 🚀 Aligned Deployment Steps
+## 🛠️ Prerequisites
 
-Follow these exact steps in order to ensure a clean installation on Android 12+.
+*   **Termux:** Install from [F-Droid](https://f-droid.org/packages/com.termux/).
+*   **Root Access:** Required for interface manipulation and binding to ports.
+*   **Wi-Fi Adapter:** Must support AP (Access Point) mode.
 
-### 1. Environment Preparation
+## 🚀 Installation & Deployment
 
-Install all required dependencies via Termux package manager:
+### 1. Environment Setup
+
 ```bash
-pkg update && pkg upgrade
-pkg install git hostapd dnsmasq iptables iproute2 coreutils python3
+pkg install git root-repo
+pkg install hostapd dnsmasq iptables iproute2 coreutils python3
