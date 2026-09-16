@@ -47,6 +47,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         # Captive Portal Detection Interception
+        # If the OS probes these URLs, redirect them to our portal to force the popup
         probe_domains = ['connectivitycheck.gstatic.com', 'generate_204.google.com', 
                          'captive.apple.com', 'detectportal.firefox.com']
         
@@ -74,7 +75,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         params = parse_qs(post_data)
         user_password = params.get('password', [''])[0]
 
-        # SECURE COMPARISON
+        # SECURE COMPARISON (Prevents timing attacks)
         if secrets.compare_digest(user_password, CORRECT_PASSWORD):
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
