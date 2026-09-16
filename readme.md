@@ -37,3 +37,28 @@ Engineered specifically for **Android 12+**, it utilizes `iptables-nft` compatib
 ```bash
 pkg install git root-repo
 pkg install hostapd dnsmasq iptables iproute2 coreutils python3
+
+2. Phantom Process Killer (Android 12+ Mandatory)
+Run this once via ADB or Root Shell to prevent the OS from terminating the watchdog loop:
+bash
+
+1
+3. Deployment
+bash
+
+123456
+⚙️ Configuration
+Upon running, the script will prompt for:
+SSID: Network name (Raw input supports special characters).
+Password: WPA2 Passphrase (Min 8 chars). This password is used for both Wi-Fi and the Captive Portal.
+Channel: Wi-Fi channel (Default: 7).
+The script will automatically:
+Disable Android's native Wi-Fi to claim the radio.
+Generate hostapd.conf and securely save the Wi-Fi password to $PREFIX/tmp/hp_pass (chmod 600).
+Start the Python3 Captive Portal (server.py) on port 8080.
+Configure the network interfaces, IP forwarding, and DNS spoofing for captive portal detection.
+Start the gost DNS proxy.
+🐛 Troubleshooting
+"No default route found": Ensure you have an active internet connection (Cellular Data or USB Tethering) before starting the script.
+Captive Portal Not Popping Up: The script automatically spoofs connectivitycheck.gstatic.com and captive.apple.com. If it still doesn't pop up, manually visit http://10.0.0.1:8080 in a browser.
+Hostapd Fails to Start: Ensure no other app is using the Wi-Fi radio. The script attempts to kill wpa_supplicant locks via svc wifi disable, but some aggressive OEM skins may require you to manually turn off Wi-Fi in settings first.
