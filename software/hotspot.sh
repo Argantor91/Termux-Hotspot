@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Termux-Hotspot: Engineering Grade
-# Version: 10.1.0 (The Absolute Finality Edition)
+# Version: 10.3.0 (Repository Finality)
 # Description: A non-destructive, state-aware, secure network subsystem for rooted Android.
 
 # --- Color Codes ---
@@ -16,6 +16,9 @@ if [ -z "$PREFIX" ]; then
 fi
 export PATH="$PREFIX/bin:$PREFIX/sbin:$PATH"
 
+# Resolve script directory for portable execution
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
 # --- Core Configuration ---
 GATEWAY_IP="10.0.0.1"
 SUBNET="10.0.0.0/24"
@@ -27,10 +30,12 @@ DNS_SERVER="1.1.1.1"
 PID_HOSTAPD="$PREFIX/tmp/hostapd.pid"
 PID_DNSMASQ="$PREFIX/tmp/dnsmasq.pid"
 PID_GOST="$PREFIX/tmp/gost.pid"
+PID_PORTAL="$PREFIX/tmp/portal.pid"
 
 HOSTAPD_RESTARTS=0
 DNSMASQ_RESTARTS=0
 GOST_RESTARTS=0
+PORTAL_RESTARTS=0
 
 # --- Helper Functions ---
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -38,7 +43,7 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_err() { echo -e "${RED}[ERR]${NC} $1"; }
 
 # --- 1. Dependency Check ---
-for cmd in hostapd dnsmasq iptables ip iw ss sysctl; do
+for cmd in hostapd dnsmasq iptables ip iw ss sysctl python3; do
     if ! command -v $cmd &>/dev/null; then
         log_err "Missing core dependency: $cmd. Install with: pkg install $cmd"
         exit 1
@@ -153,8 +158,14 @@ iptables -A TERMUX_HOTSPOT_NAT -i "$AP_IF" -p tcp --dport 53 -j REDIRECT --to-po
 iptables -A TERMUX_HOTSPOT_NAT -i "$AP_IF" -p udp --dport 53 -j REDIRECT --to-port 5353
 
 # --- 9. Bulletproof Infrastructure Deployment ---
-mkdir -p "$PREFIX/etc/hostapd"
-cat > "$PREFIX/etc/hostapd/hostapd.conf" <<'EOL'
+mkdir -p "$PREFIX/etc/hotspot"
+
+# Save Password for Portal (Securely)
+echo -n "$PASSWORD" > "$PREFIX/tmp/hp_pass"
+chmod 600 "$PREFIX/tmp/hp_pass"
+
+# Generate hostapd.conf
+cat > "$PREFIX/etc/hotspot/hostapd.conf" <<'EOL'
 interface=AP_IF_PLACEHOLDER
 driver=nl80211
 hw_mode=g
@@ -165,12 +176,10 @@ wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 EOL
 
-# Inject variables safely using printf (preserves literal backslashes and dollars)
-printf "ssid=%s\n" "$SSID" >> "$PREFIX/etc/hostapd/hostapd.conf"
-printf "wpa_passphrase=%s\n" "$PASSWORD" >> "$PREFIX/etc/hostapd/hostapd.conf"
+printf "ssid=%s\n" "$SSID" >> "$PREFIX/etc/hotspot/hostapd.conf"
+printf "wpa_passphrase=%s\n" "$PASSWORD" >> "$PREFIX/etc/hotspot/hostapd.conf"
 
-# Replace placeholders for non-user variables
-sed -i "s/AP_IF_PLACEHOLDER/$AP_IF/g; s/CHANNEL_PLACEHOLDER/$CHANNEL/g" "$PREFIX/etc/hostapd/hostapd.conf"
+sed -i "s/AP_IF_PLACEHOLDER/$AP_IF/g; s/CHANNEL_PLACEHOLDER/$CHANNEL/g" "$PREFIX/etc/hotspot/hostapd.conf"
 
 # --- 10. Process Supervision ---
 log_info "Spawning daemons..."
@@ -180,12 +189,18 @@ DNSMASQ_BIN="$PREFIX/bin/dnsmasq"
 GOST_BIN="$PREFIX/bin/gost"
 
 start_hostapd() {
-    $HOSTAPD_BIN "$PREFIX/etc/hostapd/hostapd.conf" &
+    $HOSTAPD_BIN "$PREFIX/etc/hotspot/hostapd.conf" &
     echo $! > "$PID_HOSTAPD"
 }
 
 start_dnsmasq() {
-    $DNSMASQ_BIN -d -i "$AP_IF" --port=0 --dhcp-range=$DHCP_START,$DHCP_END,255.255.255.0,12h --dhcp-option=3,$GATEWAY_IP --dhcp-option=6,$GATEWAY_IP &
+    $DNSMASQ_BIN -d -i "$AP_IF" --port=0 \
+        --dhcp-range=$DHCP_START,$DHCP_END,255.255.255.0,12h \
+        --dhcp-option=3,$GATEWAY_IP --dhcp-option=6,$GATEWAY_IP \
+        --address=/connectivitycheck.gstatic.com/$GATEWAY_IP \
+        --address=/generate_204.google.com/$GATEWAY_IP \
+        --address=/captive.apple.com/$GATEWAY_IP \
+        --address=/detectportal.firefox.com/$GATEWAY_IP &
     echo $! > "$PID_DNSMASQ"
 }
 
@@ -194,11 +209,21 @@ start_gost() {
     echo $! > "$PID_GOST"
 }
 
+start_portal() {
+    export GATEWAY_IP
+    export PREFIX
+    python3 "$SCRIPT_DIR/server.py" &
+    echo $! > "$PID_PORTAL"
+}
+
 start_hostapd
 start_dnsmasq
 start_gost
+start_portal
 
 sleep 2
+
+# Verify DNS and Portal
 if ! ss -lun | grep -q ":5353"; then
     log_err "DNS Proxy failed to bind. Exiting."
     exit 1
@@ -208,7 +233,7 @@ fi
 cleanup() {
     echo -e "\n${YELLOW}Stopping subsystem and restoring state...${NC}"
     
-    for pid_file in "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST"; do
+    for pid_file in "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST" "$PID_PORTAL"; do
         [ -f "$pid_file" ] && kill $(cat "$pid_file") 2>/dev/null
     done
     sleep 1
@@ -244,7 +269,7 @@ cleanup() {
     ip addr del ${GATEWAY_IP}/24 dev "$AP_IF" 2>/dev/null || true
     ip link set "$AP_IF" down 2>/dev/null
     
-    rm -f "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST"
+    rm -f "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST" "$PID_PORTAL" "$PREFIX/tmp/hp_pass"
     log_info "Subsystem offline. Host restored."
 }
 trap cleanup EXIT SIGINT SIGTERM
@@ -253,7 +278,7 @@ log_info "System live. Watchdog active. Press Ctrl+C to exit."
 
 # --- 12. The Watchdog (Machine-Scale Supervision) ---
 while true; do
-    for pid_file in "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST"; do
+    for pid_file in "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST" "$PID_PORTAL"; do
         [ ! -f "$pid_file" ] && continue
         pid=$(cat "$pid_file")
         [ -z "$pid" ] && continue
@@ -276,12 +301,17 @@ while true; do
                     GOST_RESTARTS=$((GOST_RESTARTS + 1))
                     log_warn "GOST died; restarting..."
                     start_gost ;;
+                *portal*)
+                    PORTAL_RESTARTS=$((PORTAL_RESTARTS + 1))
+                    log_warn "Portal died; restarting..."
+                    start_portal ;;
             esac
         else
             case "$pid_file" in
                 *hostapd*) HOSTAPD_RESTARTS=0 ;;
                 *dnsmasq*) DNSMASQ_RESTARTS=0 ;;
                 *gost*) GOST_RESTARTS=0 ;;
+                *portal*) PORTAL_RESTARTS=0 ;;
             esac
         fi
     done
