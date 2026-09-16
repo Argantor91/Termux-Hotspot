@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Termux-Hotspot: Engineering Grade
-# Version: 9.3.0 (The "Absolute Certainty" Edition)
-# Description: A non-destructive, state-aware network subsystem for rooted Android.
+# Version: 10.1.0 (The Absolute Finality Edition)
+# Description: A non-destructive, state-aware, secure network subsystem for rooted Android.
 
 # --- Color Codes ---
 RED='\033[0;31m'
@@ -18,14 +18,19 @@ export PATH="$PREFIX/bin:$PREFIX/sbin:$PATH"
 
 # --- Core Configuration ---
 GATEWAY_IP="10.0.0.1"
+SUBNET="10.0.0.0/24"
 DHCP_START="10.0.0.10"
 DHCP_END="10.0.0.100"
 DNS_SERVER="1.1.1.1"
 
-# PID Files
+# PID Files & Watchdog Counters
 PID_HOSTAPD="$PREFIX/tmp/hostapd.pid"
 PID_DNSMASQ="$PREFIX/tmp/dnsmasq.pid"
 PID_GOST="$PREFIX/tmp/gost.pid"
+
+HOSTAPD_RESTARTS=0
+DNSMASQ_RESTARTS=0
+GOST_RESTARTS=0
 
 # --- Helper Functions ---
 log_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -33,12 +38,15 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_err() { echo -e "${RED}[ERR]${NC} $1"; }
 
 # --- 1. Dependency Check ---
-for cmd in hostapd dnsmasq iptables ip iw ss sysctl tc; do
+for cmd in hostapd dnsmasq iptables ip iw ss sysctl; do
     if ! command -v $cmd &>/dev/null; then
-        log_err "Missing: $cmd. Install with: pkg install $cmd"
+        log_err "Missing core dependency: $cmd. Install with: pkg install $cmd"
         exit 1
     fi
 done
+
+HAS_TC=0
+command -v tc &>/dev/null && HAS_TC=1
 
 # --- 2. Root Check ---
 if [[ $EUID -ne 0 ]]; then
@@ -46,19 +54,28 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# --- 3. User Configuration ---
-read -p "Enter SSID: " SSID
-read -sp "Enter Password (min 8 chars): " PASSWORD; echo ""
-[ ${#PASSWORD} -lt 8 ] && { log_err "Password too short!"; exit 1; }
-read -p "Enter Channel (default 7): " CHANNEL
+# --- 3. Secure User Configuration (Raw Input) ---
+log_info "Configuring Hotspot..."
+read -r -p "Enter SSID: " SSID
+[[ -z "$SSID" ]] && { log_err "SSID cannot be empty."; exit 1; }
+
+read -r -s -p "Enter Password (min 8 chars): " PASSWORD; echo ""
+[[ ${#PASSWORD} -lt 8 ]] && { log_err "Password too short!"; exit 1; }
+
+read -r -p "Enter Channel (default 7): " CHANNEL
 CHANNEL=${CHANNEL:-7}
 
 # --- 4. Hardware & Interface Detection ---
-# Robust AP detection via iw
 AP_IF=$(iw dev | awk '$1=="Interface"{print $2}' | head -n 1)
 [ -z "$AP_IF" ] && AP_IF="wlan0"
 
-# Robust WAN detection via active routing table
+PHY_IDX=$(iw dev "$AP_IF" info 2>/dev/null | grep -oP 'wiphy \K\d+')
+if [ -n "$PHY_IDX" ]; then
+    if ! iw phy "phy$PHY_IDX" info | grep -q "\* AP"; then
+        log_warn "Interface $AP_IF (phy$PHY_IDX) might not support AP mode."
+    fi
+fi
+
 WAN_IF=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+')
 if [ -z "$WAN_IF" ] || [ "$WAN_IF" == "$AP_IF" ]; then
     log_err "No valid WAN interface found. Ensure Mobile Data is ON."
@@ -66,74 +83,94 @@ if [ -z "$WAN_IF" ] || [ "$WAN_IF" == "$AP_IF" ]; then
 fi
 log_info "Interfaces locked: AP=$AP_IF | WAN=$WAN_IF"
 
-# --- 5. State Capture ---
+# --- 5. State Capture & Pre-Flight Cleanup ---
 ORIG_IP_FORWARD=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "0")
 ORIG_IPV6_STATE=$(sysctl -n net.ipv6.conf.$AP_IF.disable_ipv6 2>/dev/null || echo "0")
+ORIG_SELINUX=$(getenforce 2>/dev/null || echo "Disabled")
+
+if [ "$ORIG_SELINUX" == "Enforcing" ]; then
+    log_warn "SELinux is Enforcing. Setting to Permissive for nl80211 compatibility."
+    setenforce 0
+fi
 
 # Clean up any orphaned chains from previous crashed runs
-iptables -D FORWARD -j TERMUX_HOTSPOT 2>/dev/null
-iptables -F TERMUX_HOTSPOT 2>/dev/null
-iptables -X TERMUX_HOTSPOT 2>/dev/null
+iptables -D FORWARD -j TERMUX_HOTSPOT_FWD 2>/dev/null
+iptables -t nat -D POSTROUTING -j TERMUX_HOTSPOT_POST 2>/dev/null
 iptables -t nat -D PREROUTING -j TERMUX_HOTSPOT_NAT 2>/dev/null
-iptables -t nat -F TERMUX_HOTSPOT_NAT 2>/dev/null
-iptables -t nat -X TERMUX_HOTSPOT_NAT 2>/dev/null
+
+for chain in TERMUX_HOTSPOT_FWD; do
+    iptables -F "$chain" 2>/dev/null; iptables -X "$chain" 2>/dev/null
+done
+for chain in TERMUX_HOTSPOT_NAT TERMUX_HOTSPOT_POST; do
+    iptables -t nat -F "$chain" 2>/dev/null; iptables -t nat -X "$chain" 2>/dev/null
+done
 
 # --- 6. Initialization & Network State ---
 log_info "Initializing network subsystem..."
-
-# Enable IP Forwarding (Fixed: explicitly set to 1, not ORIG)
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
-
-# Disable IPv6 on AP to force consistent IPv4 NAT behavior
 sysctl -w net.ipv6.conf.$AP_IF.disable_ipv6=1 >/dev/null 2>&1
 
-# Idempotent IP assignment
+ip link set "$AP_IF" up 2>/dev/null
 ip addr replace ${GATEWAY_IP}/24 dev "$AP_IF" 2>/dev/null || \
 ip addr add ${GATEWAY_IP}/24 dev "$AP_IF" 2>/dev/null || true
 
 # --- 7. QoS Application (Cake -> FQ_Codel Fallback) ---
 QOS_APPLIED=""
-if tc qdisc replace dev "$WAN_IF" root cake 2>/dev/null; then
-    QOS_APPLIED="cake"
-    log_info "CAKE QoS applied."
-elif tc qdisc replace dev "$WAN_IF" root fq_codel 2>/dev/null; then
-    QOS_APPLIED="fq_codel"
-    log_info "Fallback: fq_codel applied."
+if [ "$HAS_TC" -eq 1 ]; then
+    if tc qdisc replace dev "$WAN_IF" root cake 2>/dev/null; then
+        QOS_APPLIED="cake"
+        log_info "CAKE QoS applied."
+    elif tc qdisc replace dev "$WAN_IF" root fq_codel 2>/dev/null; then
+        QOS_APPLIED="fq_codel"
+        log_info "Fallback: fq_codel applied."
+    fi
 fi
 
-# --- 8. Iptables Engine (Injection & Dedicated Chains) ---
+# --- 8. The Invincible Netfilter Engine ---
 log_info "Injecting iptables rules..."
 
-# Create custom chains in their correct tables
-iptables -N TERMUX_HOTSPOT
-iptables -t nat -N TERMUX_HOTSPOT_NAT
+# 1. Create Custom Chains
+iptables -N TERMUX_HOTSPOT_FWD 2>/dev/null
+iptables -t nat -N TERMUX_HOTSPOT_NAT 2>/dev/null
+iptables -t nat -N TERMUX_HOTSPOT_POST 2>/dev/null
 
-# Inject explicit allows at the top of the FORWARD chain
-iptables -I FORWARD 1 -i "$AP_IF" -o "$WAN_IF" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
-iptables -I FORWARD 2 -i "$WAN_IF" -o "$AP_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A FORWARD -j TERMUX_HOTSPOT
-iptables -A TERMUX_HOTSPOT -j ACCEPT
+# 2. Inject Jumps at the Absolute Top (Priority & Immunity)
+iptables -I FORWARD 1 -j TERMUX_HOTSPOT_FWD
+iptables -t nat -I POSTROUTING 1 -j TERMUX_HOTSPOT_POST
+iptables -t nat -I PREROUTING 1 -j TERMUX_HOTSPOT_NAT 
 
-# NAT rules (Fixed: Added UDP, fixed chain jumping)
-iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
-iptables -t nat -A PREROUTING -i "$AP_IF" -p tcp --dport 53 -j TERMUX_HOTSPOT_NAT
-iptables -t nat -A PREROUTING -i "$AP_IF" -p udp --dport 53 -j TERMUX_HOTSPOT_NAT
-iptables -t nat -A TERMUX_HOTSPOT_NAT -j REDIRECT --to-port 5353
+# 3. Populate FORWARD Chain (Subnet Restricted)
+iptables -A TERMUX_HOTSPOT_FWD -s $SUBNET -i "$AP_IF" -o "$WAN_IF" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+iptables -A TERMUX_HOTSPOT_FWD -d $SUBNET -i "$WAN_IF" -o "$AP_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A TERMUX_HOTSPOT_FWD -j RETURN 
 
-# --- 9. Infrastructure Deployment ---
+# 4. Populate POSTROUTING Chain (Subnet Restricted)
+iptables -A TERMUX_HOTSPOT_POST -s $SUBNET -o "$WAN_IF" -j MASQUERADE
+
+# 5. Populate PREROUTING Chain (DNS/HTTP Interception)
+iptables -A TERMUX_HOTSPOT_NAT -i "$AP_IF" -p tcp --dport 80 -j REDIRECT --to-port 8080
+iptables -A TERMUX_HOTSPOT_NAT -i "$AP_IF" -p tcp --dport 53 -j REDIRECT --to-port 5353
+iptables -A TERMUX_HOTSPOT_NAT -i "$AP_IF" -p udp --dport 53 -j REDIRECT --to-port 5353
+
+# --- 9. Bulletproof Infrastructure Deployment ---
 mkdir -p "$PREFIX/etc/hostapd"
-cat > "$PREFIX/etc/hostapd/hostapd.conf" <<EOL
-interface=$AP_IF
+cat > "$PREFIX/etc/hostapd/hostapd.conf" <<'EOL'
+interface=AP_IF_PLACEHOLDER
 driver=nl80211
-ssid=$SSID
 hw_mode=g
-channel=$CHANNEL
+channel=CHANNEL_PLACEHOLDER
 wpa=2
-wpa_passphrase=$PASSWORD
 wpa_key_mgmt=WPA-PSK
 wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 EOL
+
+# Inject variables safely using printf (preserves literal backslashes and dollars)
+printf "ssid=%s\n" "$SSID" >> "$PREFIX/etc/hostapd/hostapd.conf"
+printf "wpa_passphrase=%s\n" "$PASSWORD" >> "$PREFIX/etc/hostapd/hostapd.conf"
+
+# Replace placeholders for non-user variables
+sed -i "s/AP_IF_PLACEHOLDER/$AP_IF/g; s/CHANNEL_PLACEHOLDER/$CHANNEL/g" "$PREFIX/etc/hostapd/hostapd.conf"
 
 # --- 10. Process Supervision ---
 log_info "Spawning daemons..."
@@ -148,14 +185,12 @@ start_hostapd() {
 }
 
 start_dnsmasq() {
-    # Fixed: Port 0 stops dnsmasq from binding to 53, avoiding collision with GOST
     $DNSMASQ_BIN -d -i "$AP_IF" --port=0 --dhcp-range=$DHCP_START,$DHCP_END,255.255.255.0,12h --dhcp-option=3,$GATEWAY_IP --dhcp-option=6,$GATEWAY_IP &
     echo $! > "$PID_DNSMASQ"
 }
 
 start_gost() {
-    # GOST listens on 5353 (which iptables redirects to), and forwards to upstream
-    $GOST_BIN -L "dns://127.0.0.1:5353?dns=tls://$DNS_SERVER:853" --log-level=error &
+    $GOST_BIN -L "dns://127.0.0.1:5353?dns=tls://$DNS_SERVER:853,$DNS_SERVER:53" --log-level=error >> "$PREFIX/tmp/gost.log" 2>&1 &
     echo $! > "$PID_GOST"
 }
 
@@ -169,42 +204,46 @@ if ! ss -lun | grep -q ":5353"; then
     exit 1
 fi
 
-# --- 11. Cleanup (The Destructive Restoration) ---
+# --- 11. Cleanup (The Hard Teardown) ---
 cleanup() {
     echo -e "\n${YELLOW}Stopping subsystem and restoring state...${NC}"
     
-    # Kill tracked PIDs
     for pid_file in "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST"; do
         [ -f "$pid_file" ] && kill $(cat "$pid_file") 2>/dev/null
     done
     sleep 1
     killall hostapd dnsmasq gost 2>/dev/null
     
-    # Delete injected rules (Fixed: Removed invalid position numbers)
-    iptables -D FORWARD -i "$AP_IF" -o "$WAN_IF" -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
-    iptables -D FORWARD -i "$WAN_IF" -o "$AP_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
-    iptables -D FORWARD -j TERMUX_HOTSPOT 2>/dev/null
+    # 1. Delete the JUMPS from the main chains (Signature-based, safe)
+    iptables -D FORWARD -j TERMUX_HOTSPOT_FWD 2>/dev/null
+    iptables -t nat -D POSTROUTING -j TERMUX_HOTSPOT_POST 2>/dev/null
+    iptables -t nat -D PREROUTING -j TERMUX_HOTSPOT_NAT 2>/dev/null
     
-    iptables -t nat -D POSTROUTING -o "$WAN_IF" -j MASQUERADE 2>/dev/null
-    iptables -t nat -D PREROUTING -i "$AP_IF" -p tcp --dport 53 -j TERMUX_HOTSPOT_NAT 2>/dev/null
-    iptables -t nat -D PREROUTING -i "$AP_IF" -p udp --dport 53 -j TERMUX_HOTSPOT_NAT 2>/dev/null
-    
-    # Flush and delete custom chains
-    iptables -F TERMUX_HOTSPOT 2>/dev/null
-    iptables -X TERMUX_HOTSPOT 2>/dev/null
+    # 2. Flush and delete all custom chains (Zero risk to host OS)
+    iptables -F TERMUX_HOTSPOT_FWD 2>/dev/null
+    iptables -X TERMUX_HOTSPOT_FWD 2>/dev/null
     iptables -t nat -F TERMUX_HOTSPOT_NAT 2>/dev/null
     iptables -t nat -X TERMUX_HOTSPOT_NAT 2>/dev/null
+    iptables -t nat -F TERMUX_HOTSPOT_POST 2>/dev/null
+    iptables -t nat -X TERMUX_HOTSPOT_POST 2>/dev/null
     
-    # Restore states
+    # 3. Restore System State
     sysctl -w net.ipv4.ip_forward="$ORIG_IP_FORWARD" >/dev/null 2>&1
     sysctl -w net.ipv6.conf.$AP_IF.disable_ipv6="$ORIG_IPV6_STATE" >/dev/null 2>&1
     
-    # Remove QoS
-    if [ -n "$QOS_APPLIED" ]; then
+    if [ "$ORIG_SELINUX" == "Enforcing" ]; then
+        setenforce 1
+    fi
+    
+    # 4. Remove QoS
+    if [ "$HAS_TC" -eq 1 ] && [ -n "$QOS_APPLIED" ]; then
         tc qdisc del dev "$WAN_IF" root 2>/dev/null
     fi
     
+    # 5. Hard Teardown: Surgically remove our IP and power down radio
     ip addr del ${GATEWAY_IP}/24 dev "$AP_IF" 2>/dev/null || true
+    ip link set "$AP_IF" down 2>/dev/null
+    
     rm -f "$PID_HOSTAPD" "$PID_DNSMASQ" "$PID_GOST"
     log_info "Subsystem offline. Host restored."
 }
@@ -220,11 +259,29 @@ while true; do
         [ -z "$pid" ] && continue
         
         if ! kill -0 "$pid" 2>/dev/null; then
-            log_warn "$(basename "$pid_file" .pid) died; restarting..."
             case "$pid_file" in
-                *hostapd*) start_hostapd ;;
-                *dnsmasq*) start_dnsmasq ;;
-                *gost*)    start_gost ;;
+                *hostapd*)
+                    if (( HOSTAPD_RESTARTS >= 3 )); then
+                        log_err "Hostapd failed 3 times. Radio hardware unstable. Tearing down."
+                        exit 1
+                    fi
+                    HOSTAPD_RESTARTS=$((HOSTAPD_RESTARTS + 1))
+                    log_warn "Hostapd died; restarting... ($HOSTAPD_RESTARTS/3)"
+                    start_hostapd ;;
+                *dnsmasq*)
+                    DNSMASQ_RESTARTS=$((DNSMASQ_RESTARTS + 1))
+                    log_warn "Dnsmasq died; restarting..."
+                    start_dnsmasq ;;
+                *gost*)
+                    GOST_RESTARTS=$((GOST_RESTARTS + 1))
+                    log_warn "GOST died; restarting..."
+                    start_gost ;;
+            esac
+        else
+            case "$pid_file" in
+                *hostapd*) HOSTAPD_RESTARTS=0 ;;
+                *dnsmasq*) DNSMASQ_RESTARTS=0 ;;
+                *gost*) GOST_RESTARTS=0 ;;
             esac
         fi
     done
